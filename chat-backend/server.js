@@ -1,3 +1,4 @@
+// backend/server.js
 const { createServer } = require("http");
 const next = require("next");
 const { parse } = require("url");
@@ -8,6 +9,7 @@ const app = next({ dev });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
+  // 1) HTTP server que responde tanto a Next como a websockets
   const server = createServer((req, res) => {
     try {
       const parsedUrl = parse(req.url, true);
@@ -19,6 +21,7 @@ app.prepare().then(() => {
     }
   });
 
+  // 2) Montamos Socket.io
   const io = new IOServer(server, {
     path: "/socket.io",
     cors: {
@@ -27,23 +30,18 @@ app.prepare().then(() => {
     },
   });
 
-  // users: socket.id -> nickname
+  // 3) Mapa de usuarios y validación de nicknames
   const users = {};
 
   io.on("connection", (socket) => {
     console.log("⚡️ New socket connected:", socket.id);
 
-    // Cuando el cliente emite "join"
     socket.on("join", (nickname) => {
-      // 1) Validar si ya existe ese nickname en users
-      const nicknamesEnUso = Object.values(users);
-      if (nicknamesEnUso.includes(nickname)) {
-        // Emitir un evento de error solo a este socket
+      const used = Object.values(users);
+      if (used.includes(nickname)) {
         socket.emit("joinError", "Nickname already in use. Choose another.");
         return;
       }
-
-      // 2) Si no existe, registrar normalmente
       users[socket.id] = nickname;
       io.emit("userList", Object.values(users));
       io.emit("systemMessage", `${nickname} joined the chat.`);
@@ -51,45 +49,36 @@ app.prepare().then(() => {
 
     socket.on("sendMessage", (message) => {
       const sender = users[socket.id] || "Anonymous";
-      const payload = {
+      io.emit("newMessage", {
         sender,
         content: message,
         timestamp: Date.now(),
-      };
-      io.emit("newMessage", payload);
+      });
     });
 
     socket.on("privateMessage", ({ to, content }) => {
       const sender = users[socket.id];
-      if (!sender) return;
-      const recipientSocketId = Object.entries(users).find(
-        ([id, nick]) => nick === to
-      )?.[0];
-      if (recipientSocketId) {
-        const payload = {
-          sender,
-          content,
-          timestamp: Date.now(),
-          recipient: to,
-        };
-        io.to(recipientSocketId).emit("newPrivateMessage", payload);
+      const recipientId = Object.entries(users).find(([, nick]) => nick === to)?.[0];
+      if (recipientId) {
+        const payload = { sender, content, timestamp: Date.now(), recipient: to };
+        io.to(recipientId).emit("newPrivateMessage", payload);
         socket.emit("newPrivateMessage", payload);
       }
     });
 
     socket.on("disconnect", () => {
-      const nickname = users[socket.id];
-      if (nickname) {
+      const nick = users[socket.id];
+      if (nick) {
         delete users[socket.id];
         io.emit("userList", Object.values(users));
-        io.emit("systemMessage", `${nickname} left the chat.`);
+        io.emit("systemMessage", `${nick} left the chat.`);
       }
     });
   });
 
+  // 4) Arrancamos en el puerto que Render provee
   const PORT = parseInt(process.env.PORT || "3000", 10);
-  server.listen(PORT, (err) => {
-    if (err) throw err;
+  server.listen(PORT, () => {
     console.log(`> Server listening on http://localhost:${PORT}`);
   });
 });

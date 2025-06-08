@@ -1,33 +1,95 @@
-// backend/server.js
 const { createServer } = require("http");
+const next = require("next");
+const { parse } = require("url");
 const { Server: IOServer } = require("socket.io");
 
-const PORT = parseInt(process.env.PORT, 10) || 3000;
+const dev = process.env.NODE_ENV !== "production";
+const app = next({ dev });
+const handle = app.getRequestHandler();
 
-// 1) Creamos un HTTP server con un handler básico
-const httpServer = createServer((req, res) => {
-  // si es un GET a la raíz, devolvemos 200
-  if (req.method === "GET" && req.url === "/") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("OK");
-  } else {
-    // para cualquier otra ruta, también cerramos la conexión
-    res.writeHead(404);
-    res.end();
-  }
-});
+app.prepare().then(() => {
+  const server = createServer((req, res) => {
+    try {
+      const parsedUrl = parse(req.url, true);
+      handle(req, res, parsedUrl);
+    } catch (err) {
+      console.error("❌ Error handling request:", err);
+      res.statusCode = 500;
+      res.end("Internal Server Error");
+    }
+  });
 
-// 2) Montamos Socket.io sobre ese mismo servidor
-const io = new IOServer(httpServer, {
-  path: "/socket.io",
-  cors: { origin: "*" },
-});
+  const io = new IOServer(server, {
+    path: "/socket.io",
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"],
+    },
+  });
 
-const users = {};
-io.on("connection", socket => {
-  /* ... tu lógica de join, messages, disconnect ... */
-});
+  // users: socket.id -> nickname
+  const users = {};
 
-httpServer.listen(PORT, () => {
-  console.log(`WebSocket backend listening on http://0.0.0.0:${PORT}`);
+  io.on("connection", (socket) => {
+    console.log("⚡️ New socket connected:", socket.id);
+
+    // Cuando el cliente emite "join"
+    socket.on("join", (nickname) => {
+      // 1) Validar si ya existe ese nickname en users
+      const nicknamesEnUso = Object.values(users);
+      if (nicknamesEnUso.includes(nickname)) {
+        // Emitir un evento de error solo a este socket
+        socket.emit("joinError", "Nickname already in use. Choose another.");
+        return;
+      }
+
+      // 2) Si no existe, registrar normalmente
+      users[socket.id] = nickname;
+      io.emit("userList", Object.values(users));
+      io.emit("systemMessage", `${nickname} joined the chat.`);
+    });
+
+    socket.on("sendMessage", (message) => {
+      const sender = users[socket.id] || "Anonymous";
+      const payload = {
+        sender,
+        content: message,
+        timestamp: Date.now(),
+      };
+      io.emit("newMessage", payload);
+    });
+
+    socket.on("privateMessage", ({ to, content }) => {
+      const sender = users[socket.id];
+      if (!sender) return;
+      const recipientSocketId = Object.entries(users).find(
+        ([id, nick]) => nick === to
+      )?.[0];
+      if (recipientSocketId) {
+        const payload = {
+          sender,
+          content,
+          timestamp: Date.now(),
+          recipient: to,
+        };
+        io.to(recipientSocketId).emit("newPrivateMessage", payload);
+        socket.emit("newPrivateMessage", payload);
+      }
+    });
+
+    socket.on("disconnect", () => {
+      const nickname = users[socket.id];
+      if (nickname) {
+        delete users[socket.id];
+        io.emit("userList", Object.values(users));
+        io.emit("systemMessage", `${nickname} left the chat.`);
+      }
+    });
+  });
+
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+  server.listen(PORT, (err) => {
+    if (err) throw err;
+    console.log(`> Server listening on http://localhost:${PORT}`);
+  });
 });

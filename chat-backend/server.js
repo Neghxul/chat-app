@@ -64,6 +64,20 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("sendImage", ({ to, data }) => {
+  const sender = users[socket.id];
+  const payload = { sender, image: data, timestamp: Date.now(), recipient: to };
+  if (to === "group") {
+    io.emit("newImage", payload);
+  } else {
+    const rid = Object.entries(users).find(([,n]) => n===to)?.[0];
+    if (rid) {
+      io.to(rid).emit("newPrivateImage", payload);
+      socket.emit("newPrivateImage", payload);
+    }
+  }
+});
+
   socket.on("disconnect", () => {
     const nick = users[socket.id];
     if (nick) {
